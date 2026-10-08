@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Visor de CFDI</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>try { tailwind.config = { darkMode: 'class' }; } catch (e) {}</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); color-scheme: light; }
+  html.dark { color-scheme: dark; }
+  body { margin: 0; background: #f8fafc; color: #1e293b; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  html.dark body { background: #0b1220; color: #f1f5f9; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) body { background: #0b1220; color: #f1f5f9; }
+  }
+</style>
+</head>
+<body>
+<div id="root" data-boot="1"><p style="padding:2rem;font-family:system-ui,sans-serif">Cargando visor de CFDI…</p></div>
+<script>
+// Guardia de arranque: si algo falla antes de que React pinte, se muestra el motivo en vez de una pantalla en blanco.
+(function () {
+  function show(msg) {
+    var r = document.getElementById('root');
+    if (!r || !r.getAttribute('data-boot')) return;
+    var p = document.createElement('pre');
+    p.style.cssText = 'padding:1.5rem;white-space:pre-wrap;color:#b91c1c;font-family:system-ui,sans-serif';
+    p.textContent = msg;
+    r.innerHTML = ''; r.appendChild(p);
+  }
+  window.addEventListener('error', function (e) { show('Error al iniciar el visor: ' + (e.message || 'desconocido')); });
+  window.addEventListener('load', function () {
+    if (!window.React || !window.ReactDOM) show('No se pudo cargar React desde la CDN. Revisa tu conexión y recarga la página.');
+  });
+})();
+</script>
+<script>
+const { useState, useEffect, useRef, useMemo, createElement: h } = React;
+
+const TIPOS = {
+  I: ['Ingreso', 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'],
+  E: ['Egreso', 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300'],
+  P: ['Pago', 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'],
+  N: ['Nómina', 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'],
+  T: ['Traslado', 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300']
+};
+const TIPO_FALLBACK = ['?', 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'];
+const tipoInfo = (t) => TIPOS[t] || [t || '?', TIPO_FALLBACK[1]];
+const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+const num = (v) => { const x = parseFloat(v); return isNaN(x) ? 0 : x; };
+const MXN = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' });
+const money = (v, dash) => (dash && !v ? '—' : MXN.format(v || 0));
+
+function parseCFDI(xml, path) {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('XML mal formado');
+  const q = (root, n) => Array.from(root.getElementsByTagNameNS('*', n));
+  const c = q(doc, 'Comprobante')[0];
+  if (!c) throw new Error('No es un CFDI (no tiene nodo Comprobante)');
+  const a = (el, n) => (el && el.getAttribute(n)) || '';
+  const em = q(c, 'Emisor')[0], re = q(c, 'Receptor')[0], tf = q(c, 'TimbreFiscalDigital')[0];
+  const tipo = a(c, 'TipoDeComprobante').toUpperCase();
+  let iva = 0, ivaRet = 0, isrRet = 0;
+  const imp = Array.from(c.children).find((e) => e.localName === 'Impuestos'); // solo nivel comprobante
+  if (imp) {
+    q(imp, 'Traslado').forEach((t) => { if (a(t, 'Impuesto') === '002') iva += num(a(t, 'Importe')); });
+    q(imp, 'Retencion').forEach((r) => {
+      const i = a(r, 'Impuesto'), m = num(a(r, 'Importe'));
+      if (i === '002') ivaRet += m; else if (i === '001') isrRet += m;
+    });
+  }
+  if (tipo === 'P') { // Complemento de Pagos 2.0
+    const t = q(c, 'Totales')[0];
+    if (t) {
+      iva += num(a(t, 'TotalTrasladosImpuestoIVA16')) + num(a(t, 'TotalTrasladosImpuestoIVA8'));
+      ivaRet += num(a(t, 'TotalRetencionesIVA')); isrRet += num(a(t, 'TotalRetencionesISR'));
+    }
+  }
+  const fecha = a(c, 'Fecha');
+  const fm = /^(\d{4})-(\d{2})/.exec(fecha);
+  return {
+    id: path, tipo, fecha, year: fm ? fm[1] : '', month: fm ? fm[2] : '',
+    emisorRfc: a(em, 'Rfc'), emisorNombre: a(em, 'Nombre'),
+    receptorRfc: a(re, 'Rfc'), receptorNombre: a(re, 'Nombre'),
+    uuid: a(tf, 'UUID').toUpperCase(),
+    subtotal: num(a(c, 'SubTotal')), descuento: num(a(c, 'Descuento')),
+    iva, ivaRet, isrRet, total: num(a(c, 'Total')),
+    moneda: a(c, 'Moneda') || 'MXN', tc: num(a(c, 'TipoCambio')) || 1
+  };
+}
+
+function toCSV(list) {
+  const head = ['Tipo', 'Fecha', 'RFC Emisor', 'Nombre Emisor', 'RFC Receptor', 'Nombre Receptor', 'UUID', 'Moneda',
+    'Tipo de cambio', 'Subtotal', 'Descuento', 'IVA trasladado', 'IVA retenido', 'ISR retenido', 'Total', 'Archivo'];
+  const esc = (v, txt) => {
+    let s = String(v == null ? '' : v);
+    if (txt && /^[=+\-@\t\r]/.test(s)) s = "'" + s; // evita inyección de fórmulas en Excel
+    return /[",\r\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const f2 = (n) => (n || 0).toFixed(2);
+  const lines = [head.join(',')];
+  list.forEach((x) => {
+    lines.push([
+      esc(tipoInfo(x.tipo)[0], 1), esc(x.fecha, 1), esc(x.emisorRfc, 1), esc(x.emisorNombre, 1), esc(x.receptorRfc, 1),
+      esc(x.receptorNombre, 1), esc(x.uuid, 1), esc(x.moneda, 1), x.tc, f2(x.subtotal), f2(x.descuento), f2(x.iva),
+      f2(x.ivaRet), f2(x.isrRet), f2(x.total), esc(x.id, 1)
+    ].join(','));
+  });
+  return '\ufeff' + lines.join('\r\n'); // BOM para que Excel respete acentos
+}
+
+const COLS = [
+  { k: 'tipo', l: 'Tipo' }, { k: 'fecha', l: 'Fecha' },
+  { k: 'emisorNombre', l: 'Emisor' }, { k: 'receptorNombre', l: 'Receptor' },
+  { k: 'uuid', l: 'UUID' },
+  { k: 'subtotal', l: 'Subtotal', n: 1 }, { k: 'descuento', l: 'Descuento', n: 1, d: 1 },
+  { k: 'iva', l: 'IVA trasl.', n: 1, d: 1 }, { k: 'ivaRet', l: 'IVA ret.', n: 1, d: 1 },
+  { k: 'isrRet', l: 'ISR ret.', n: 1, d: 1 }, { k: 'total', l: 'Total', n: 1 }
+];
+const CARD = 'rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm';
+const SELECT = 'rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-emerald-500';
+
+class Boundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  render() {
+    if (this.state.err) {
+      return h('pre', { style: { padding: '1.5rem', whiteSpace: 'pre-wrap', color: '#b91c1c' } },
+        'Ocurrió un error al mostrar la pantalla: ' + (this.state.err.message || this.state.err) + '\nRecarga la página e intenta de nuevo.');
+    }
+    return this.props.children;
+  }
+}
+
+function Stat({ label, val }) {
+  return h('div', { className: CARD + ' px-4 py-3' },
+    h('p', { className: 'text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400' }, label),
+    h('p', { className: 'text-lg font-semibold tabular-nums' }, money(val)));
+}
+
+function Party({ rfc, nombre }) {
+  return h('div', null,
+    h('div', { className: 'font-mono text-xs font-semibold' }, rfc || '—'),
+    h('div', { className: 'text-xs text-slate-500 dark:text-slate-400 max-w-[16rem] truncate', title: nombre || '' }, nombre || 'Sin nombre'));
+}
+
+function Th({ c, sort, setSort }) {
+  const active = sort.k === c.k;
+  return h('th', {
+    onClick: () => setSort({ k: c.k, dir: active ? -sort.dir : 1 }),
+    className: 'px-3 py-2 text-xs font-semibold uppercase tracking-wide cursor-pointer select-none whitespace-nowrap hover:text-emerald-600 dark:hover:text-emerald-400 ' + (c.n ? 'text-right' : 'text-left')
+  }, c.l + (active ? (sort.dir === 1 ? ' ▲' : ' ▼') : ''));
+}
+
+function Tr({ x }) {
+  const t = tipoInfo(x.tipo);
+  const cells = [
+    h('td', { key: 't', className: 'px-3 py-2' }, h('span', { className: 'px-2 py-0.5 rounded-full text-xs font-medium ' + t[1] }, t[0])),
+    h('td', { key: 'f', className: 'px-3 py-2 whitespace-nowrap', title: x.fecha }, (x.fecha || '').slice(0, 10) || '—'),
+    h('td', { key: 'e', className: 'px-3 py-2' }, h(Party, { rfc: x.emisorRfc, nombre: x.emisorNombre })),
+    h('td', { key: 'r', className: 'px-3 py-2' }, h(Party, { rfc: x.receptorRfc, nombre: x.receptorNombre })),
+    h('td', { key: 'u', className: 'px-3 py-2 font-mono text-xs whitespace-nowrap' }, x.uuid || '—')
+  ];
+  COLS.filter((c) => c.n).forEach((c) => {
+    cells.push(h('td', { key: c.k, className: 'px-3 py-2 text-right tabular-nums whitespace-nowrap ' + (c.k === 'total' ? 'font-semibold' : '') },
+      money(x[c.k], c.d),
+      c.k === 'total' && x.moneda !== 'MXN' ? h('span', { className: 'block text-xs text-slate-500' }, x.moneda) : null));
+  });
+  return h('tr', { className: 'hover:bg-slate-50 dark:hover:bg-slate-800/50' }, cells);
+}
+
+function DataTable({ rows, sort, setSort }) {
+  const body = rows.length === 0
+    ? [h('tr', { key: 'empty' }, h('td', { colSpan: COLS.length, className: 'px-3 py-8 text-center text-slate-500' }, 'Sin resultados con los filtros actuales'))]
+    : rows.map((x) => h(Tr, { key: x.id, x }));
+  return h('div', { className: 'overflow-x-auto max-h-[32rem] overflow-y-auto' },
+    h('table', { className: 'min-w-full text-sm' },
+      h('thead', { className: 'sticky top-0 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300' },
+        h('tr', null, COLS.map((c) => h(Th, { key: c.k, c, sort, setSort })))),
+      h('tbody', { className: 'divide-y divide-slate-100 dark:divide-slate-800' }, body)));
+}
+
+function App() {
+  const [dark, setDark] = useState(() => {
+    try { const t = localStorage.getItem('cfdi-theme'); if (t) return t === 'dark'; } catch (e) {}
+    try { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); } catch (e) { return false; }
+  });
+  const [dragging, setDragging] = useState(false);
+  const [status, setStatus] = useState('idle'); // idle | loading | done | error
+  const [result, setResult] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [errs, setErrs] = useState([]);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [fTipo, setFTipo] = useState('all');
+  const [fYear, setFYear] = useState('all');
+  const [fMonth, setFMonth] = useState('all');
+  const [sort, setSort] = useState({ k: 'fecha', dir: 1 });
+  const [dl, setDl] = useState(null);
+  const [note, setNote] = useState('');
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', dark);
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    try { localStorage.setItem('cfdi-theme', dark ? 'dark' : 'light'); } catch (e) {}
+  }, [dark]);
+
+  useEffect(() => { // capacidad de descarga del visor (puede no estar disponible)
+    let on = true;
+    try {
+      if (window.claude && window.claude.use) {
+        window.claude.use('downloads').then((d) => { if (on) setDl(d || null); }).catch(() => {});
+      }
+    } catch (e) {}
+    return () => { on = false; };
+  }, []);
+
+  async function handleFile(file) {
+    if (!file) return;
+    if (!/\.zip$/i.test(file.name)) { setStatus('error'); setError('El archivo debe tener extensión .zip'); return; }
+    if (typeof JSZip === 'undefined') {
+      setStatus('error'); setError('No se pudo cargar JSZip desde la CDN. Revisa tu conexión y recarga la página.'); return;
+    }
+    setStatus('loading'); setError(''); setNote(''); setSearch(''); setFTipo('all'); setFYear('all'); setFMonth('all');
+    try {
+      const zip = await JSZip.loadAsync(file);
+      const xmls = [], otros = [];
+      zip.forEach((path, entry) => {
+        if (entry.dir) return;
+        const base = path.split('/').pop();
+        if (path.startsWith('__MACOSX/') || base.startsWith('._')) return;
+        (/\.xml$/i.test(base) ? xmls : otros).push(path);
+      });
+      xmls.sort();
+      const out = await Promise.all(xmls.map(async (p) => {
+        try {
+          const entry = zip.file(p);
+          if (!entry) throw new Error('Entrada no encontrada en el ZIP');
+          const text = (await entry.async('string')).replace(/^\ufeff/, '');
+          if (!text.trim()) throw new Error('Archivo vacío');
+          return { ok: parseCFDI(text, p) };
+        } catch (e) {
+          return { err: p + ' — ' + ((e && e.message) || 'error desconocido') };
+        }
+      }));
+      setRows(out.filter((o) => o.ok).map((o) => o.ok));
+      setErrs(out.filter((o) => o.err).map((o) => o.err));
+      setResult({ name: file.name, size: file.size, count: xmls.length, otros: otros.length });
+      setStatus('done');
+    } catch (e) {
+      setStatus('error'); setError('No se pudo leer el ZIP. Verifica que no esté dañado o protegido con contraseña.');
+    }
+  }
+
+  const years = useMemo(() => Array.from(new Set(rows.map((r) => r.year).filter(Boolean))).sort().reverse(), [rows]);
+  const tipoCount = useMemo(() => {
+    const m = {}; rows.forEach((r) => { m[r.tipo] = (m[r.tipo] || 0) + 1; }); return m;
+  }, [rows]);
+
+  const view = useMemo(() => {
+    const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
+    const col = COLS.find((c) => c.k === sort.k) || COLS[1];
+    return rows.filter((x) => {
+      if (fTipo !== 'all' && x.tipo !== fTipo) return false;
+      if (fYear !== 'all' && x.year !== fYear) return false;
+      if (fMonth !== 'all' && x.month !== fMonth) return false;
+      if (!terms.length) return true;
+      const hay = [tipoInfo(x.tipo)[0], x.fecha, x.emisorRfc, x.emisorNombre, x.receptorRfc, x.receptorNombre, x.uuid,
+        x.subtotal, x.descuento, x.iva, x.ivaRet, x.isrRet, x.total, x.moneda, x.id].join(' ').toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    }).sort((p, q) => {
+      const A = p[sort.k], B = q[sort.k];
+      return (col.n ? A - B : String(A).localeCompare(String(B), 'es')) * sort.dir;
+    });
+  }, [rows, search, fTipo, fYear, fMonth, sort]);
+
+  const sum = useMemo(() => {
+    const s = { ing: 0, egr: 0, iva: 0, ivaRet: 0, isrRet: 0 };
+    view.forEach((x) => {
+      if (x.tipo === 'I') s.ing += x.total * x.tc;
+      if (x.tipo === 'E') s.egr += x.total * x.tc;
+      s.iva += x.iva * x.tc; s.ivaRet += x.ivaRet * x.tc; s.isrRet += x.isrRet * x.tc;
+    });
+    return s;
+  }, [view]);
+
+  async function exportCSV() {
+    if (!view.length) { setNote('No hay comprobantes para exportar con los filtros actuales.'); return; }
+    const csv = toCSV(view);
+    if (dl) {
+      try {
+        await dl.save({ filename: 'cfdi_' + new Date().toISOString().slice(0, 10) + '.csv', data: csv });
+        setNote('CSV generado con ' + view.length + ' comprobantes.');
+      } catch (e) {
+        if (!e || e.code !== 'declined') setNote('No se pudo guardar el archivo: ' + ((e && e.message) || 'error desconocido'));
+      }
+    } else {
+      try { await navigator.clipboard.writeText(csv); setNote('Descarga no disponible aquí: el CSV se copió al portapapeles, pégalo en Excel.'); }
+      catch (e) { setNote('La descarga y el portapapeles no están disponibles en este visor.'); }
+    }
+  }
+
+  const onDrop = (e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer && e.dataTransfer.files[0]); };
+  const fmt = (b) => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+  const n = result ? result.count : 0;
+  const msg = n === 1 ? 'Se encontró 1 archivo XML listo para procesar' : 'Se encontraron ' + n + ' archivos XML listos para procesar';
+  const filtersOn = fTipo !== 'all' || fYear !== 'all' || fMonth !== 'all' || search;
+
+  const zone = h('div', {
+    onDragOver: (e) => { e.preventDefault(); setDragging(true); }, onDragLeave: () => setDragging(false), onDrop,
+    onClick: () => inputRef.current && inputRef.current.click(),
+    className: 'cursor-pointer rounded-2xl border-2 border-dashed p-8 text-center transition-colors ' +
+      (dragging ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40' : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:border-emerald-400')
+  },
+    h('input', { ref: inputRef, type: 'file', accept: '.zip,application/zip', className: 'hidden',
+      onChange: (e) => { handleFile(e.target.files[0]); e.target.value = ''; } }),
+    h('div', { className: 'text-4xl mb-2' }, status === 'loading' ? '⏳' : '🗂️'),
+    h('p', { className: 'text-lg font-semibold' }, status === 'loading' ? 'Descomprimiendo y leyendo CFDI…' : 'Arrastra aquí tu archivo .zip'),
+    h('p', { className: 'text-sm text-slate-500 dark:text-slate-400 mt-1' }, 'o haz clic para seleccionarlo · contiene tus CFDI en formato XML'));
+
+  const counter = status === 'done' && result ? h('div', { className: CARD + ' mt-6 p-5 flex items-center gap-5' },
+    h('div', { className: 'shrink-0 w-20 h-20 rounded-2xl flex items-center justify-center text-3xl font-bold ' +
+      (n > 0 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300') }, n),
+    h('div', null,
+      h('p', { className: 'text-lg font-semibold' }, msg),
+      h('p', { className: 'text-sm text-slate-500 dark:text-slate-400 mt-1 break-all' },
+        result.name + ' · ' + fmt(result.size) + ' · ' + rows.length + ' CFDI leídos' +
+        (errs.length ? ' · ' + errs.length + ' con error' : '') + (result.otros ? ' · ' + result.otros + ' no XML ignorados' : '')))) : null;
+
+  const errBox = (status === 'error' || errs.length > 0) ? h('div', {
+    className: 'mt-4 rounded-xl border border-red-300 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 p-4 text-sm'
+  }, status === 'error' ? error : h('div', null,
+    h('p', { className: 'font-semibold mb-1' }, 'Estos archivos no se pudieron leer (el resto sí se procesó):'),
+    h('ul', { className: 'list-disc pl-5 break-all max-h-40 overflow-y-auto' }, errs.map((e) => h('li', { key: e }, e))))) : null;
+
+  const toolbar = h('div', { className: 'p-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center gap-2' },
+    h('input', { type: 'search', value: search, onChange: (e) => setSearch(e.target.value),
+      placeholder: 'Buscar por RFC, nombre, UUID, monto…', className: SELECT + ' flex-1 min-w-[12rem]' }),
+    h('select', { value: fTipo, onChange: (e) => setFTipo(e.target.value), className: SELECT, 'aria-label': 'Tipo de comprobante' },
+      [h('option', { key: 'all', value: 'all' }, 'Todos los tipos')].concat(
+        Object.keys(TIPOS).map((k) => h('option', { key: k, value: k }, TIPOS[k][0] + ' (' + (tipoCount[k] || 0) + ')')))),
+    h('select', { value: fYear, onChange: (e) => setFYear(e.target.value), className: SELECT, 'aria-label': 'Año' },
+      [h('option', { key: 'all', value: 'all' }, 'Todos los años')].concat(years.map((y) => h('option', { key: y, value: y }, y)))),
+    h('select', { value: fMonth, onChange: (e) => setFMonth(e.target.value), className: SELECT, 'aria-label': 'Mes' },
+      [h('option', { key: 'all', value: 'all' }, 'Todos los meses')].concat(
+        MESES.map((m, i) => { const v = String(i + 1).padStart(2, '0'); return h('option', { key: v, value: v }, m); }))),
+    filtersOn ? h('button', { onClick: () => { setSearch(''); setFTipo('all'); setFYear('all'); setFMonth('all'); },
+      className: 'text-sm text-slate-500 hover:text-emerald-600 underline px-1' }, 'Limpiar') : null,
+    h('button', { onClick: exportCSV, className: 'rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2' },
+      dl ? '⬇ Exportar CSV' : '📋 Copiar CSV'));
+
+  const table = status === 'done' && rows.length > 0 ? h('div', { className: 'mt-6' },
+    h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-3 mb-4' },
+      h(Stat, { label: 'Ingresos', val: sum.ing }), h(Stat, { label: 'Egresos', val: sum.egr }),
+      h(Stat, { label: 'IVA trasladado', val: sum.iva }), h(Stat, { label: 'IVA retenido', val: sum.ivaRet }),
+      h(Stat, { label: 'ISR retenido', val: sum.isrRet })),
+    h('div', { className: CARD + ' overflow-hidden' },
+      toolbar,
+      h('div', { className: 'px-3 py-2 text-sm text-slate-500 dark:text-slate-400 flex justify-between gap-2 flex-wrap' },
+        h('span', null, view.length + ' de ' + rows.length + ' comprobantes'), note ? h('span', null, note) : null),
+      h(DataTable, { rows: view, sort, setSort })),
+    h('p', { className: 'text-xs text-slate-500 dark:text-slate-400 mt-3' },
+      'Las tarjetas y el CSV usan los comprobantes filtrados; las tarjetas convierten a MXN con el TipoCambio del CFDI. El estatus de cancelación no puede verificarse sin conexión al SAT.')) : null;
+
+  return h('div', { className: 'min-h-screen' },
+    h('div', { className: 'mx-auto max-w-7xl px-4 py-8' },
+      h('header', { className: 'flex items-start justify-between gap-4 mb-8' },
+        h('div', null,
+          h('h1', { className: 'text-2xl font-bold tracking-tight' }, 'Visor de CFDI'),
+          h('p', { className: 'text-sm text-slate-500 dark:text-slate-400 mt-1' }, '🔒 Todo se procesa en tu navegador. Ningún archivo sale de tu equipo.')),
+        h('button', { onClick: () => setDark(!dark), 'aria-label': 'Cambiar tema',
+          className: 'shrink-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800' },
+          dark ? '☀️ Claro' : '🌙 Oscuro')),
+      zone, counter, errBox, table));
+}
+
+const rootEl = document.getElementById('root');
+ReactDOM.createRoot(rootEl).render(h(Boundary, null, h(App)));
+rootEl.removeAttribute('data-boot');
+</script>
+</body>
+</html>
