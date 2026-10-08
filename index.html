@@ -462,8 +462,7 @@ function XmlModal({ x, mode, dl, onClose }) {
   async function download() {
     try {
       if (!window.jspdf) { setMsg('No se pudo cargar el generador de PDF desde la CDN.'); return; }
-      if (!dl) { setMsg('La descarga no está disponible en este visor.'); return; }
-      await dl.save({ filename: 'CFDI_' + ((x.uuid || 'sin-uuid').slice(0, 8)) + '.pdf', data: buildPDF(x) });
+      await saveFile('CFDI_' + ((x.uuid || 'sin-uuid').slice(0, 8)) + '.pdf', buildPDF(x), dl);
       setMsg('');
     } catch (e) { if (!e || e.code !== 'declined') setMsg('No se pudo generar el PDF.'); }
   }
@@ -497,7 +496,16 @@ function XmlModal({ x, mode, dl, onClose }) {
         m === 'pdf' ? paper : h('pre', { className: 'text-xs font-mono bg-slate-100 dark:bg-slate-950 rounded-lg p-3 overflow-auto whitespace-pre' }, pretty))));
 }
 
-async function buildXlsx(list, cols, g, meta) {
+async function saveFile(name, data, dl) {
+  if (dl) { await dl.save({ filename: name, data }); return; } // visor de claude.ai
+  const blob = data instanceof Blob ? data : new Blob([data], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob); // cualquier otro entorno web (GitHub Pages, archivo local...)
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+async function buildXlsx(list, cols, sm, meta) {
   const esc = (v) => String(v == null ? '' : v).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const L = (i) => { let n = '', k = i + 1; while (k > 0) { const m = (k - 1) % 26; n = String.fromCharCode(65 + m) + n; k = Math.floor((k - 1) / 26); } return n; };
   const T = (r, c, v, st) => '<c r="' + L(c) + r + '" s="' + (st || 0) + '" t="inlineStr"><is><t xml:space="preserve">' + esc(v) + '</t></is></c>';
@@ -508,20 +516,19 @@ async function buildXlsx(list, cols, g, meta) {
   const HS = { g: 2, o: 3, b: 4 };
   const first = 6, end = first + list.length - 1, last = cols.length - 1, tr = end + 1;
   const rows = [
-    row(1, [T(1, 0, 'EGRESOS — FACTURAS RECIBIDAS', 8)]),
+    row(1, [T(1, 0, meta.title, 8)]),
     row(2, [T(2, 0, 'Consolidado del período' + (meta.nombre ? ' · ' + meta.nombre : '') + (meta.rfc ? ' · ' + meta.rfc : '') + (meta.per ? ' · ' + meta.per : ''), 0)]),
     row(3, [T(3, 0, list.length + ' CFDI · El Subtotal de cada fila es el SubTotal declarado en el CFDI', 0)]),
     row(5, cols.map((c, i) => T(5, i, c.l, c.n ? HS[c.n] : 1)))
   ];
   list.forEach((x, k) => { const r = first + k; rows.push(row(r, cols.map((c, i) => (c.n ? N(r, i, c.g(x), c.n === 'b' ? 6 : 5) : T(r, i, c.g(x), 0))))); });
   rows.push(row(tr, cols.map((c, i) => (i === 0 ? T(tr, 0, 'TOTAL', 10) : c.n ? N(tr, i, list.reduce((a, x) => a + c.g(x), 0), 6, 'SUM(' + L(i) + first + ':' + L(i) + end + ')') : T(tr, i, '', 10)))));
-  const widths = cols.map((c) => (c.n ? 14 : c.concept ? 40 : c.l === 'Cliente / Proveedor' ? 34 : c.l === 'UUID' ? 38 : c.l.startsWith('Desc.') ? 30 : c.badge ? 11 : 16));
+  const widths = cols.map((c) => (c.n ? 14 : c.concept ? 40 : c.l === 'Cliente / Proveedor' || c.l === 'Empleado' ? 34 : c.l === 'Recibo' ? 26 : c.l === 'UUID' ? 38 : c.l.startsWith('Desc.') ? 30 : c.badge ? 11 : 16));
   const cx = '<cols>' + widths.map((w, i) => '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>').join('') + '</cols>';
   const sheet1 = NS + '<worksheet ' + MAIN + '><sheetViews><sheetView workbookViewId="0"><pane ySplit="5" topLeftCell="A6" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' + cx +
     '<sheetData>' + rows.join('') + '</sheetData><autoFilter ref="A5:' + L(last) + end + '"/><mergeCells count="1"><mergeCell ref="A1:' + L(Math.min(last, 7)) + '1"/></mergeCells></worksheet>';
-  const sm = [['Subtotal (base = IVA ÷ tasa, por CFDI)', g.sub], ['IVA trasladado 16%', g.iva16], ['IVA trasladado 8%', g.iva8], ['IVA retenido', -g.ivaRet], ['ISR retenido', -g.isrRet], ['TOTAL CATEGORÍA', g.total], ['Fuera del cálculo (importes sin IVA 16%/8%)', g.out]];
-  const rows2 = [row(1, [T(1, 0, 'Resumen de Egresos', 7)]), row(2, [T(2, 0, g.n + ' CFDI contabilizados' + (meta.per ? ' · ' + meta.per : ''), 0)])]
-    .concat(sm.map((r, i) => row(4 + i, [T(4 + i, 0, r[0], r[0] === 'TOTAL CATEGORÍA' ? 10 : 0), N(4 + i, 1, r[1], r[0] === 'TOTAL CATEGORÍA' ? 6 : 5)])));
+  const rows2 = [row(1, [T(1, 0, meta.summaryTitle, 7)]), row(2, [T(2, 0, meta.n + ' CFDI' + (meta.per ? ' · ' + meta.per : ''), 0)])]
+    .concat(sm.map((r, i) => row(4 + i, [T(4 + i, 0, r[0], r[2] ? 10 : 0), N(4 + i, 1, r[1], r[2] ? 6 : 5)])));
   const sheet2 = NS + '<worksheet ' + MAIN + '><cols><col min="1" max="1" width="48" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/></cols><sheetData>' + rows2.join('') + '</sheetData></worksheet>';
   const fill = (rgb) => '<fill><patternFill patternType="solid"><fgColor rgb="' + rgb + '"/><bgColor indexed="64"/></patternFill></fill>';
   const hx = (fi, fl) => '<xf numFmtId="0" fontId="' + fi + '" fillId="' + fl + '" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>';
@@ -544,8 +551,8 @@ async function buildXlsx(list, cols, g, meta) {
     '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
     '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>');
   z.file('_rels/.rels', NS + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
-  z.file('xl/workbook.xml', NS + '<workbook ' + MAIN + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Egresos" sheetId="1" r:id="rId1"/><sheet name="Resumen" sheetId="2" r:id="rId2"/></sheets>' +
-    '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">Egresos!$A$5:$' + L(last) + '$' + end + '</definedName></definedNames></workbook>');
+  z.file('xl/workbook.xml', NS + '<workbook ' + MAIN + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="' + esc(meta.sheet) + '" sheetId="1" r:id="rId1"/><sheet name="Resumen" sheetId="2" r:id="rId2"/></sheets>' +
+    '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">\'' + esc(meta.sheet) + '\'!$A$5:$' + L(last) + '$' + end + '</definedName></definedNames></workbook>');
   z.file('xl/_rels/workbook.xml.rels', NS + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
     '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>' +
@@ -685,28 +692,33 @@ function App() {
   const colsFor = curTab === 'nom' ? NCOLS : ECOLS;
   async function deliver(csv, prefix, n) {
     if (!n) { setNote('No hay comprobantes para exportar con los filtros actuales.'); return; }
-    if (dl) {
-      try {
-        await dl.save({ filename: prefix + '_' + new Date().toISOString().slice(0, 10) + '.csv', data: csv });
-        setNote('CSV generado con ' + n + ' comprobantes.');
-      } catch (e) {
-        if (!e || e.code !== 'declined') setNote('No se pudo guardar el archivo: ' + ((e && e.message) || 'error desconocido'));
-      }
-    } else {
-      try { await navigator.clipboard.writeText(csv); setNote('Descarga no disponible aquí: el CSV se copió al portapapeles, pégalo en Excel.'); }
-      catch (e) { setNote('La descarga y el portapapeles no están disponibles en este visor.'); }
-    }
+    try {
+      await saveFile(prefix + '_' + new Date().toISOString().slice(0, 10) + '.csv', csv, dl);
+      setNote('CSV generado con ' + n + ' comprobantes.');
+    } catch (e) { if (!e || e.code !== 'declined') setNote('No se pudo guardar el archivo: ' + ((e && e.message) || 'error desconocido')); }
   }
   const exportCSV = () => deliver(toCSVCols(tableRows, colsFor), 'cfdi', tableRows.length);
+  function summaryRows() {
+    const cat = (g) => [['Subtotal (base = IVA ÷ tasa, por CFDI)', g.sub], ['IVA trasladado 16%', g.iva16], ['IVA trasladado 8%', g.iva8],
+      ['IVA retenido', -g.ivaRet], ['ISR retenido', -g.isrRet], ['TOTAL CATEGORÍA', g.total, 1], ['Fuera del cálculo (importes sin IVA 16%/8%)', g.out]];
+    if (curTab === 'egr') return cat(sum.egr);
+    if (curTab === 'ing') return cat(sum.ing);
+    if (curTab === 'nom') { const g = sum.nom; return [['Percepciones (subtotal)', g.sub], ['ISR retenido', -g.isrRet], ['IMSS y otras deducciones', -(g.sub - g.total - g.isrRet)], ['TOTAL CATEGORÍA (neto pagado)', g.total, 1]]; }
+    const cats = [['Ingresos', sum.ing], ['Egresos', sum.egr], ['Nóminas', sum.nom]].filter((c) => c[1].n > 0);
+    return cats.reduce((a, c) => a.concat([[c[0] + ' · Subtotal', c[1].sub], [c[0] + ' · Total categoría', c[1].total]]), []).concat([['GRAN TOTAL', cats.reduce((a, c) => a + c[1].total, 0), 1]]);
+  }
   async function exportXlsx() {
-    if (!tableRows.length) { setNote('No hay egresos para exportar con los filtros actuales.'); return; }
-    if (typeof JSZip === 'undefined') { setNote('No se pudo cargar JSZip para generar el Excel.'); return; }
+    if (!tableRows.length) { setNote('No hay comprobantes para exportar con los filtros actuales.'); return; }
+    if (typeof JSZip === 'undefined') { setNote('No se pudo cargar la librería para armar el Excel; se exporta CSV.'); exportCSV(); return; }
     try {
       const nombre = (rowsC.find((x) => rfcN && x.emisorRfc.toUpperCase() === rfcN) || {}).emisorNombre ||
         (rowsC.find((x) => rfcN && x.receptorRfc.toUpperCase() === rfcN) || {}).receptorNombre || '';
-      const blob = await buildXlsx(tableRows, ECOLS.filter((c) => !c.cls), sum.egr, { rfc: rfcN, per: periodo(view), nombre });
-      await dl.save({ filename: 'egresos_' + new Date().toISOString().slice(0, 10) + '.xlsx', data: blob });
-      setNote('Excel generado con ' + tableRows.length + ' egresos.');
+      const CT = { all: ['COMPROBANTES — TOTAL GENERAL', 'CFDI', 'cfdi'], egr: ['EGRESOS — FACTURAS RECIBIDAS', 'Egresos', 'egresos'],
+        ing: ['INGRESOS — FACTURAS EMITIDAS', 'Ingresos', 'ingresos'], nom: ['NÓMINAS — COMPROBANTES DE NÓMINA', 'Nóminas', 'nominas'] }[curTab];
+      const cols = curTab === 'all' ? colsFor : colsFor.filter((c) => !c.cls);
+      const blob = await buildXlsx(tableRows, cols, summaryRows(), { rfc: rfcN, per: periodo(view), nombre, title: CT[0], sheet: CT[1], summaryTitle: 'Resumen · ' + CT[1], n: tableRows.length });
+      await saveFile(CT[2] + '_' + new Date().toISOString().slice(0, 10) + '.xlsx', blob, dl);
+      setNote('Excel generado con ' + tableRows.length + ' comprobantes.');
     } catch (e) { if (!e || e.code !== 'declined') setNote('No se pudo generar el archivo Excel.'); }
   }
 
@@ -766,8 +778,8 @@ function App() {
         MESES.map((m, i) => { const v = String(i + 1).padStart(2, '0'); return h('option', { key: v, value: v }, m); }))),
     filtersOn ? h('button', { onClick: () => { setSearch(''); setFTipo('all'); setFYear('all'); setFMonth('all'); },
       className: 'text-sm text-slate-500 hover:text-emerald-600 underline px-1' }, 'Limpiar') : null,
-    h('button', { onClick: curTab === 'egr' && dl ? exportXlsx : exportCSV, className: 'rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2' },
-      !dl ? '📋 Copiar CSV' : curTab === 'egr' ? '⬇ Descargar Egresos (.xlsx)' : '⬇ Exportar CSV'),
+    h('button', { onClick: exportXlsx, className: 'rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2' },
+      '⬇ Exportar a Excel (.xlsx)'),
     h('button', { onClick: () => setFull(!full), className: SELECT }, full ? '✕ Salir' : '⛶ Pantalla completa'));
 
   const table = status === 'done' && rows.length > 0 ? h('div', { className: 'mt-6' },
