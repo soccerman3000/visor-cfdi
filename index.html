@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-theme="light">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -42,15 +42,17 @@
 <script>
 const { useState, useEffect, useRef, useMemo, createElement: h } = React;
 
-const TIPOS = {
-  I: ['Ingreso', 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'],
-  E: ['Egreso', 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300'],
-  P: ['Pago', 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'],
-  N: ['Nómina', 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'],
-  T: ['Traslado', 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300']
+const CLASES = {
+  ING: ['Ingreso', 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'],
+  EGR: ['Egreso', 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300'],
+  NOM: ['Nómina', 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300'],
+  NCE: ['Nota crédito emitida', 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'],
+  NCR: ['Nota crédito recibida', 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300'],
+  PAG: ['Pago', 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300'],
+  TRA: ['Traslado', 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300'],
+  SIN: ['Sin clasificar', 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200']
 };
-const TIPO_FALLBACK = ['?', 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'];
-const tipoInfo = (t) => TIPOS[t] || [t || '?', TIPO_FALLBACK[1]];
+const claseInfo = (k) => CLASES[k] || CLASES.SIN;
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const num = (v) => { const x = parseFloat(v); return isNaN(x) ? 0 : x; };
 const MXN = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' });
@@ -65,10 +67,16 @@ function parseCFDI(xml, path) {
   const a = (el, n) => (el && el.getAttribute(n)) || '';
   const em = q(c, 'Emisor')[0], re = q(c, 'Receptor')[0], tf = q(c, 'TimbreFiscalDigital')[0];
   const tipo = a(c, 'TipoDeComprobante').toUpperCase();
-  let iva = 0, ivaRet = 0, isrRet = 0;
+  let iva = 0, iva16 = 0, iva8 = 0, base16 = 0, base8 = 0, ivaRet = 0, isrRet = 0;
   const imp = Array.from(c.children).find((e) => e.localName === 'Impuestos'); // solo nivel comprobante
   if (imp) {
-    q(imp, 'Traslado').forEach((t) => { if (a(t, 'Impuesto') === '002') iva += num(a(t, 'Importe')); });
+    q(imp, 'Traslado').forEach((t) => {
+      if (a(t, 'Impuesto') !== '002') return;
+      const m = num(a(t, 'Importe')), r = num(a(t, 'TasaOCuota'));
+      const b = a(t, 'Base') ? num(a(t, 'Base')) : (r ? m / r : 0);
+      iva += m;
+      if (Math.abs(r - 0.16) < 1e-6) { iva16 += m; base16 += b; } else if (Math.abs(r - 0.08) < 1e-6) { iva8 += m; base8 += b; }
+    });
     q(imp, 'Retencion').forEach((r) => {
       const i = a(r, 'Impuesto'), m = num(a(r, 'Importe'));
       if (i === '002') ivaRet += m; else if (i === '001') isrRet += m;
@@ -77,9 +85,36 @@ function parseCFDI(xml, path) {
   if (tipo === 'P') { // Complemento de Pagos 2.0
     const t = q(c, 'Totales')[0];
     if (t) {
-      iva += num(a(t, 'TotalTrasladosImpuestoIVA16')) + num(a(t, 'TotalTrasladosImpuestoIVA8'));
+      const p16 = num(a(t, 'TotalTrasladosImpuestoIVA16')), p8 = num(a(t, 'TotalTrasladosImpuestoIVA8'));
+      iva += p16 + p8; iva16 += p16; iva8 += p8;
+      base16 += num(a(t, 'TotalTrasladosBaseIVA16')); base8 += num(a(t, 'TotalTrasladosBaseIVA8'));
       ivaRet += num(a(t, 'TotalRetencionesIVA')); isrRet += num(a(t, 'TotalRetencionesISR'));
     }
+  }
+  let grav = 0, gravDesc = 0; // conceptos con IVA 16%/8%: importe (antes de descuento) y su descuento
+  if (tipo !== 'N' && tipo !== 'P') {
+    q(c, 'Concepto').forEach((cp) => {
+      const gr = q(cp, 'Traslado').some((t) => {
+        const r = num(a(t, 'TasaOCuota'));
+        return a(t, 'Impuesto') === '002' && (Math.abs(r - 0.16) < 1e-6 || Math.abs(r - 0.08) < 1e-6);
+      });
+      if (gr) { grav += num(a(cp, 'Importe')); gravDesc += num(a(cp, 'Descuento')); }
+    });
+    if (!grav && base16 + base8 > 0) grav = base16 + base8;
+  }
+  let nomina = null;
+  if (tipo === 'N') { // Complemento de Nómina 1.2
+    const nd = q(c, 'Nomina')[0], d = q(c, 'Deducciones')[0];
+    const sumBy = (node, attr, code) => q(c, node).filter((e) => a(e, attr) === code)
+      .reduce((t, e) => t + num(a(e, 'ImporteGravado')) + num(a(e, 'ImporteExento')) + num(a(e, 'Importe')), 0);
+    const salario = sumBy('Percepcion', 'TipoPercepcion', '001'), vales = sumBy('Percepcion', 'TipoPercepcion', '029');
+    const prima = sumBy('Percepcion', 'TipoPercepcion', '020'), imss = sumBy('Deduccion', 'TipoDeduccion', '001');
+    let isr = d ? num(a(d, 'TotalImpuestosRetenidos')) : 0;
+    if (!isr) isr = sumBy('Deduccion', 'TipoDeduccion', '002');
+    const totalPerc = num(a(nd, 'TotalPercepciones')), totalDed = num(a(nd, 'TotalDeducciones'));
+    nomina = { salario, vales, prima, otrasPerc: totalPerc - salario - vales - prima, totalPerc, isr, imss,
+      otrasDed: totalDed - isr - imss, totalDed, otrosPagos: num(a(nd, 'TotalOtrosPagos')), dias: a(nd, 'NumDiasPagados') };
+    isrRet += isr;
   }
   const fecha = a(c, 'Fecha');
   const fm = /^(\d{4})-(\d{2})/.exec(fecha);
@@ -89,14 +124,26 @@ function parseCFDI(xml, path) {
     receptorRfc: a(re, 'Rfc'), receptorNombre: a(re, 'Nombre'),
     uuid: a(tf, 'UUID').toUpperCase(),
     subtotal: num(a(c, 'SubTotal')), descuento: num(a(c, 'Descuento')),
-    iva, ivaRet, isrRet, total: num(a(c, 'Total')),
+    iva, iva16, iva8, base16, base8, grav, gravDesc, ivaRet, isrRet, nomina, total: num(a(c, 'Total')),
     moneda: a(c, 'Moneda') || 'MXN', tc: num(a(c, 'TipoCambio')) || 1
   };
 }
 
+function classify(x, rfc) {
+  if (x.tipo === 'N') return 'NOM';
+  if (x.tipo === 'P') return 'PAG';
+  if (x.tipo === 'T') return 'TRA';
+  if (x.tipo !== 'I' && x.tipo !== 'E') return 'SIN';
+  if (!rfc) return 'SIN';
+  const em = x.emisorRfc.toUpperCase() === rfc, re = x.receptorRfc.toUpperCase() === rfc;
+  if (em === re) return 'SIN'; // no coincide, o coincide como emisor y receptor a la vez
+  if (x.tipo === 'I') return em ? 'ING' : 'EGR';
+  return em ? 'NCE' : 'NCR';
+}
+
 function toCSV(list) {
-  const head = ['Tipo', 'Fecha', 'RFC Emisor', 'Nombre Emisor', 'RFC Receptor', 'Nombre Receptor', 'UUID', 'Moneda',
-    'Tipo de cambio', 'Subtotal', 'Descuento', 'IVA trasladado', 'IVA retenido', 'ISR retenido', 'Total', 'Archivo'];
+  const head = ['Clasificación', 'Tipo CFDI', 'Fecha', 'RFC Emisor', 'Nombre Emisor', 'RFC Receptor', 'Nombre Receptor', 'UUID', 'Moneda',
+    'Tipo de cambio', 'Subtotal', 'Descuento', 'IVA trasladado', 'Base IVA 16%', 'Base IVA 8%', 'IVA 16%', 'IVA 8%', 'IVA retenido', 'ISR retenido', 'Total', 'Archivo'];
   const esc = (v, txt) => {
     let s = String(v == null ? '' : v);
     if (txt && /^[=+\-@\t\r]/.test(s)) s = "'" + s; // evita inyección de fórmulas en Excel
@@ -106,12 +153,29 @@ function toCSV(list) {
   const lines = [head.join(',')];
   list.forEach((x) => {
     lines.push([
-      esc(tipoInfo(x.tipo)[0], 1), esc(x.fecha, 1), esc(x.emisorRfc, 1), esc(x.emisorNombre, 1), esc(x.receptorRfc, 1),
-      esc(x.receptorNombre, 1), esc(x.uuid, 1), esc(x.moneda, 1), x.tc, f2(x.subtotal), f2(x.descuento), f2(x.iva),
+      esc(claseInfo(x.clase)[0], 1), esc(x.tipo, 1), esc(x.fecha, 1), esc(x.emisorRfc, 1), esc(x.emisorNombre, 1), esc(x.receptorRfc, 1),
+      esc(x.receptorNombre, 1), esc(x.uuid, 1), esc(x.moneda, 1), x.tc, f2(x.subtotal), f2(x.descuento), f2(x.iva), f2(x.base16), f2(x.base8), f2(x.iva16), f2(x.iva8),
       f2(x.ivaRet), f2(x.isrRet), f2(x.total), esc(x.id, 1)
     ].join(','));
   });
   return '\ufeff' + lines.join('\r\n'); // BOM para que Excel respete acentos
+}
+
+function toCSVNomina(list) {
+  const cell = (v) => {
+    let t = String(v == null ? '' : v);
+    if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+    return /[",\r\n;]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  };
+  const f2 = (n) => (n || 0).toFixed(2);
+  const lines = [['Fecha', 'RFC empleado', 'Nombre empleado', 'UUID', 'Días pagados', 'Salario', 'Vales de despensa', 'Prima dominical',
+    'Otras percepciones', 'Total percepciones', 'ISR', 'IMSS', 'Otras deducciones', 'Total deducciones', 'Otros pagos', 'Neto', 'Archivo'].join(',')];
+  list.forEach((x) => {
+    const n = x.nomina || {};
+    lines.push([cell(x.fecha), cell(x.receptorRfc), cell(x.receptorNombre), cell(x.uuid), n.dias || '', f2(n.salario), f2(n.vales), f2(n.prima),
+      f2(n.otrasPerc), f2(n.totalPerc), f2(n.isr), f2(n.imss), f2(n.otrasDed), f2(n.totalDed), f2(n.otrosPagos), f2(x.total), cell(x.id)].join(','));
+  });
+  return '\ufeff' + lines.join('\r\n');
 }
 
 const COLS = [
@@ -119,6 +183,7 @@ const COLS = [
   { k: 'emisorNombre', l: 'Emisor' }, { k: 'receptorNombre', l: 'Receptor' },
   { k: 'uuid', l: 'UUID' },
   { k: 'subtotal', l: 'Subtotal', n: 1 }, { k: 'descuento', l: 'Descuento', n: 1, d: 1 },
+  { k: 'base16', l: 'Base IVA 16%', n: 1, d: 1 },
   { k: 'iva', l: 'IVA trasl.', n: 1, d: 1 }, { k: 'ivaRet', l: 'IVA ret.', n: 1, d: 1 },
   { k: 'isrRet', l: 'ISR ret.', n: 1, d: 1 }, { k: 'total', l: 'Total', n: 1 }
 ];
@@ -137,10 +202,91 @@ class Boundary extends React.Component {
   }
 }
 
-function Stat({ label, val }) {
-  return h('div', { className: CARD + ' px-4 py-3' },
-    h('p', { className: 'text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400' }, label),
-    h('p', { className: 'text-lg font-semibold tabular-nums' }, money(val)));
+const CATS = [
+  ['ing', 'I.', 'Ingresos', 'Facturas emitidas'],
+  ['egr', 'II.', 'Egresos', 'Facturas recibidas'],
+  ['nom', 'III.', 'Nóminas', 'Comprobantes de nómina']
+];
+
+function periodo(list) {
+  const ds = list.map((x) => (x.fecha || '').slice(0, 10)).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
+  if (!ds.length) return '';
+  const a = ds[0], b = ds[ds.length - 1];
+  if (a.slice(0, 7) === b.slice(0, 7)) { // mismo mes: se muestra el mes completo
+    const last = new Date(+a.slice(0, 4), +a.slice(5, 7), 0).getDate();
+    return a.slice(0, 7) + '-01 al ' + a.slice(0, 7) + '-' + String(last).padStart(2, '0');
+  }
+  return a + ' al ' + b;
+}
+
+function CatRow({ c, g }) {
+  const lines = [['Subtotal', g.sub]];
+  if (c[0] === 'nom') {
+    lines.push(['(−) ISR retenido', -g.isrRet]);
+    const otras = g.sub - g.total - g.isrRet;
+    if (Math.abs(otras) > 0.005) lines.push(['(−) IMSS y otras deducciones', -otras]);
+  } else {
+    lines.push(['IVA trasladado 16%', g.iva16]);
+    if (Math.abs(g.iva8) > 0.005) lines.push(['IVA trasladado 8%', g.iva8]);
+    if (Math.abs(g.ivaOtro) > 0.005) lines.push(['IVA trasladado (otras tasas)', g.ivaOtro]);
+    if (Math.abs(g.ivaRet) > 0.005) lines.push(['(−) IVA retenido', -g.ivaRet]);
+    if (Math.abs(g.isrRet) > 0.005) lines.push(['(−) ISR retenido', -g.isrRet]);
+  }
+  const memo2 = c[0] !== 'nom' && Math.abs(g.sub - g.baseXml) > 0.005 ? h('div', { className: 'flex justify-between gap-4 text-xs italic text-slate-500 dark:text-slate-400' },
+    h('span', null, 'Referencia: suma de la base declarada en los CFDI (el validador usa IVA ÷ tasa por CFDI)'), h('span', { className: 'tabular-nums font-mono' }, money(g.baseXml))) : null;
+  const memo = c[0] !== 'nom' && Math.abs(g.out) > 0.005 ? h('div', { className: 'flex justify-between gap-4 text-xs italic text-amber-700 dark:text-amber-400 pt-1' },
+    h('span', null, 'Fuera del cálculo (importes sin IVA 16%/8%: tasa 0%, exentos u otros impuestos)'), h('span', { className: 'tabular-nums font-mono' }, money(g.out))) : null;
+  return h('div', { className: 'grid md:grid-cols-[16rem_1fr] gap-4 px-6 py-5 border-b border-slate-100 dark:border-slate-800' },
+    h('div', null,
+      h('p', { className: 'text-lg font-semibold' }, h('span', { className: 'text-slate-400 mr-2 text-sm' }, c[1]), c[2]),
+      h('p', { className: 'text-sm italic text-slate-500 dark:text-slate-400' }, c[3]),
+      h('p', { className: 'text-xs tracking-wide uppercase text-slate-500 dark:text-slate-400 mt-2 font-mono' }, String(g.n).padStart(3, '0') + ' CFDI contabilizados')),
+    h('div', { className: 'space-y-1 text-sm' },
+      lines.map((l) => h('div', { key: l[0], className: 'flex justify-between gap-4 ' + (l[1] < 0 ? 'text-red-600 dark:text-red-400' : '') },
+        h('span', { className: l[1] < 0 ? '' : 'text-slate-500 dark:text-slate-400' }, l[0]), h('span', { className: 'tabular-nums font-mono' }, money(l[1])))),
+      h('div', { className: 'flex justify-between gap-4 border-t border-slate-300 dark:border-slate-600 pt-2 mt-2 font-semibold' },
+        h('span', { className: 'uppercase tracking-widest text-xs self-center' }, 'Total categoría'), h('span', { className: 'tabular-nums font-mono' }, money(g.total))),
+      memo, memo2));
+}
+
+function Report({ s, tab, setTab, nombre, rfc, per }) {
+  const tabs = [['all', 'Total general', CATS.reduce((a, c) => a + s[c[0]].n, 0)]]
+    .concat(CATS.filter((c) => s[c[0]].n > 0).map((c) => [c[0], c[2], s[c[0]].n]));
+  const cur = tabs.some((t) => t[0] === tab) ? tab : 'all';
+  const vis = CATS.filter((c) => s[c[0]].n > 0 && (cur === 'all' || cur === c[0]));
+  const G = vis.reduce((a, c) => {
+    const g = s[c[0]];
+    a.sub += g.sub; a.iva16 += g.iva16; a.iva8 += g.iva8; a.ivaRet += g.ivaRet; a.isrRet += g.isrRet; a.total += g.total; a.n += g.n; if (c[0] === 'nom') a.otras += g.sub - g.total - g.isrRet;
+    return a;
+  }, { sub: 0, iva16: 0, iva8: 0, ivaRet: 0, isrRet: 0, total: 0, n: 0, otras: 0 });
+  const tabBtn = (t) => h('button', { key: t[0], onClick: () => setTab(t[0]),
+    className: 'px-4 py-2 rounded-lg text-sm font-semibold transition-colors ' + (cur === t[0]
+      ? 'bg-emerald-600 text-white shadow' : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800') }, t[1] + ' (' + t[2] + ')');
+  return h('div', { className: 'mb-6' },
+    h('div', { className: 'inline-flex flex-wrap gap-1 p-1 mb-3 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800' }, tabs.map(tabBtn)),
+    h('div', { className: CARD + ' overflow-hidden' },
+      h('div', { className: 'px-6 py-5 border-b-2 border-slate-800 dark:border-slate-600 flex flex-wrap justify-between gap-4' },
+        h('div', null,
+          h('p', { className: 'text-xs tracking-widest uppercase font-semibold text-amber-700 dark:text-amber-400' }, 'Estado de cuenta fiscal · CFDI'),
+          h('h2', { className: 'text-2xl font-bold' }, cur === 'all' ? 'Resumen General por Categoría' : 'Resumen · ' + CATS.find((c) => c[0] === cur)[2]),
+          h('p', { className: 'text-sm text-slate-500 dark:text-slate-400 italic' }, 'Consolidado del período' + (nombre ? ' · ' + nombre : '') + (rfc ? ' · ' + rfc : ''))),
+        per ? h('div', { className: 'text-right text-sm' },
+          h('p', { className: 'text-xs tracking-widest uppercase text-slate-500 dark:text-slate-400' }, 'Período'),
+          h('p', { className: 'font-mono' }, per)) : null),
+      vis.length ? vis.map((c) => h(CatRow, { key: c[0], c, g: s[c[0]] }))
+        : h('p', { className: 'px-6 py-8 text-center text-slate-500' }, 'Sin ingresos, egresos ni nóminas clasificados con los filtros actuales.'),
+      h('div', { className: 'bg-slate-900 text-white px-6 py-5' },
+        h('div', { className: 'flex flex-wrap justify-between items-center gap-3' },
+          h('div', null,
+            h('p', { className: 'text-xs tracking-widest uppercase font-semibold text-amber-400' }, cur === 'all' ? 'Gran total del período' : 'Total de la categoría'),
+            h('p', { className: 'text-sm italic text-slate-400' }, 'Suma consolidada de ' + vis.length + (vis.length === 1 ? ' categoría' : ' categorías') + ' · ' + G.n + ' CFDI')),
+          h('p', { className: 'text-3xl font-bold tabular-nums font-mono' }, money(G.total))),
+        h('div', { className: 'grid grid-cols-2 sm:grid-cols-6 gap-3 border-t border-slate-700 mt-4 pt-4' },
+          [['Subtotal', G.sub], ['IVA 16%', G.iva16], ['IVA 8%', G.iva8], ['IVA ret.', G.ivaRet], ['ISR ret.', G.isrRet]].concat(G.otras > 0.005 ? [['IMSS y otras deduc.', G.otras]] : []).map((x) => h('div', { key: x[0] },
+            h('p', { className: 'text-xs uppercase tracking-wide text-slate-400' }, x[0]),
+            h('p', { className: 'text-sm font-mono tabular-nums' }, money(x[1])))))),
+      h('p', { className: 'px-6 py-3 text-xs italic text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-950' },
+        'Documento informativo — Cifras extraídas de los CFDI proporcionados por el contribuyente.')));
 }
 
 function Party({ rfc, nombre }) {
@@ -158,9 +304,9 @@ function Th({ c, sort, setSort }) {
 }
 
 function Tr({ x }) {
-  const t = tipoInfo(x.tipo);
+  const t = claseInfo(x.clase);
   const cells = [
-    h('td', { key: 't', className: 'px-3 py-2' }, h('span', { className: 'px-2 py-0.5 rounded-full text-xs font-medium ' + t[1] }, t[0])),
+    h('td', { key: 't', className: 'px-3 py-2' }, h('span', { title: 'CFDI tipo ' + (x.tipo || '?'), className: 'px-2 py-0.5 rounded-full text-xs font-medium whitespace-nowrap ' + t[1] }, t[0])),
     h('td', { key: 'f', className: 'px-3 py-2 whitespace-nowrap', title: x.fecha }, (x.fecha || '').slice(0, 10) || '—'),
     h('td', { key: 'e', className: 'px-3 py-2' }, h(Party, { rfc: x.emisorRfc, nombre: x.emisorNombre })),
     h('td', { key: 'r', className: 'px-3 py-2' }, h(Party, { rfc: x.receptorRfc, nombre: x.receptorNombre })),
@@ -172,6 +318,44 @@ function Tr({ x }) {
       c.k === 'total' && x.moneda !== 'MXN' ? h('span', { className: 'block text-xs text-slate-500' }, x.moneda) : null));
   });
   return h('tr', { className: 'hover:bg-slate-50 dark:hover:bg-slate-800/50' }, cells);
+}
+
+function NominaTable({ rows, onExport }) {
+  if (!rows.length) return null;
+  const v = (x, k) => (x.nomina && x.nomina[k]) || 0;
+  const tot = (k) => rows.reduce((a, x) => a + v(x, k), 0);
+  const neto = rows.reduce((a, x) => a + x.total, 0);
+  const HD = { p: 'bg-emerald-700', pt: 'bg-emerald-900', d: 'bg-red-700', dt: 'bg-rose-900', o: 'bg-slate-600' };
+  const cols = [['Salario', 'salario', 'p'], ['Vales de despensa', 'vales', 'p'], ['Prima dominical', 'prima', 'p']]
+    .concat(Math.abs(tot('otrasPerc')) > 0.005 ? [['Otras percepciones', 'otrasPerc', 'p']] : [])
+    .concat([['Total percepciones', 'totalPerc', 'pt'], ['ISR', 'isr', 'd'], ['IMSS', 'imss', 'd']])
+    .concat(Math.abs(tot('otrasDed')) > 0.005 ? [['Otras deducciones', 'otrasDed', 'd']] : [])
+    .concat([['Total deducciones', 'totalDed', 'dt'], ['Otros pagos', 'otrosPagos', 'o']]);
+  const neg = (t) => t === 'd' || t === 'dt';
+  const cell = (val, t, key, bold) => h('td', { key, className: 'px-3 py-2 text-right tabular-nums font-mono whitespace-nowrap ' + (bold ? 'font-semibold ' : '') + (neg(t) ? 'text-red-600 dark:text-red-400' : '') }, money(neg(t) ? -val : val, true));
+  const th = (key, cls, label) => h('th', { key, className: 'px-3 py-2 whitespace-nowrap ' + cls }, label);
+  const head = [th('f', 'text-left bg-slate-700', 'Fecha'), th('e', 'text-left bg-slate-700', 'Empleado'), th('u', 'text-left bg-slate-700', 'Recibo / UUID')]
+    .concat(cols.map((c) => th(c[1], 'text-right ' + HD[c[2]], c[0]))).concat([th('n', 'text-right bg-slate-900', 'Neto')]);
+  const body = rows.map((x) => h('tr', { key: x.id }, [
+    h('td', { key: 'f', className: 'px-3 py-2 whitespace-nowrap' }, (x.fecha || '').slice(0, 10)),
+    h('td', { key: 'e', className: 'px-3 py-2' }, h(Party, { rfc: x.receptorRfc, nombre: x.receptorNombre })),
+    h('td', { key: 'u', className: 'px-3 py-2 text-xs' }, 'Recibo de nómina' + (x.nomina && x.nomina.dias ? ' (' + x.nomina.dias + ' días)' : ''),
+      h('div', { className: 'font-mono text-slate-500' }, x.uuid || '—'))
+  ].concat(cols.map((c) => cell(v(x, c[1]), c[2], c[1], c[2] === 'pt' || c[2] === 'dt')))
+    .concat([h('td', { key: 'n', className: 'px-3 py-2 text-right tabular-nums font-mono font-semibold whitespace-nowrap' }, money(x.total))])));
+  const foot = h('tr', { className: 'bg-amber-50 dark:bg-slate-800 font-semibold border-t-2 border-amber-300' }, [
+    h('td', { key: 'l', colSpan: 3, className: 'px-3 py-3 uppercase text-xs tracking-widest' }, 'Total general')
+  ].concat(cols.map((c) => cell(tot(c[1]), c[2], c[1], true)))
+    .concat([h('td', { key: 'n', className: 'px-3 py-3 text-right font-mono' }, h('span', { className: 'rounded bg-blue-600 text-white px-2 py-1' }, money(neto)))]));
+  return h('div', { className: CARD + ' overflow-hidden mb-6' },
+    h('div', { className: 'px-4 py-3 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800' },
+      h('p', { className: 'font-semibold' }, 'Detalle de nóminas · ' + rows.length + ' recibos'),
+      h('button', { onClick: onExport, className: 'rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-100 dark:hover:bg-slate-800' }, '⬇ Descargar nóminas (CSV)')),
+    h('div', { className: 'overflow-x-auto' },
+      h('table', { className: 'min-w-full text-sm' },
+        h('thead', null, h('tr', { className: 'text-white text-xs uppercase tracking-wide' }, head)),
+        h('tbody', { className: 'divide-y divide-slate-100 dark:divide-slate-800' }, body),
+        h('tfoot', null, foot))));
 }
 
 function DataTable({ rows, sort, setSort }) {
@@ -187,8 +371,7 @@ function DataTable({ rows, sort, setSort }) {
 
 function App() {
   const [dark, setDark] = useState(() => {
-    try { const t = localStorage.getItem('cfdi-theme'); if (t) return t === 'dark'; } catch (e) {}
-    try { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); } catch (e) { return false; }
+    try { return localStorage.getItem('cfdi-theme-v2') === 'dark'; } catch (e) { return false; }
   });
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState('idle'); // idle | loading | done | error
@@ -203,12 +386,14 @@ function App() {
   const [sort, setSort] = useState({ k: 'fecha', dir: 1 });
   const [dl, setDl] = useState(null);
   const [note, setNote] = useState('');
+  const [tab, setTab] = useState('all');
+  const [rfc, setRfc] = useState(() => { try { return localStorage.getItem('cfdi-rfc') || ''; } catch (e) { return ''; } });
   const inputRef = useRef(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
-    try { localStorage.setItem('cfdi-theme', dark ? 'dark' : 'light'); } catch (e) {}
+    try { localStorage.setItem('cfdi-theme-v2', dark ? 'dark' : 'light'); } catch (e) {}
   }, [dark]);
 
   useEffect(() => { // capacidad de descarga del visor (puede no estar disponible)
@@ -258,45 +443,62 @@ function App() {
     }
   }
 
-  const years = useMemo(() => Array.from(new Set(rows.map((r) => r.year).filter(Boolean))).sort().reverse(), [rows]);
+  useEffect(() => { try { localStorage.setItem('cfdi-rfc', rfc.trim().toUpperCase()); } catch (e) {} }, [rfc]);
+  const rfcN = rfc.trim().toUpperCase();
+  const rfcOk = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/.test(rfcN);
+  const rowsC = useMemo(() => rows.map((r) => Object.assign({}, r, { clase: classify(r, rfcN) })), [rows, rfcN]);
+  const years = useMemo(() => Array.from(new Set(rowsC.map((r) => r.year).filter(Boolean))).sort().reverse(), [rowsC]);
   const tipoCount = useMemo(() => {
-    const m = {}; rows.forEach((r) => { m[r.tipo] = (m[r.tipo] || 0) + 1; }); return m;
-  }, [rows]);
+    const m = {}; rowsC.forEach((r) => { m[r.clase] = (m[r.clase] || 0) + 1; }); return m;
+  }, [rowsC]);
 
   const view = useMemo(() => {
     const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
     const col = COLS.find((c) => c.k === sort.k) || COLS[1];
-    return rows.filter((x) => {
-      if (fTipo !== 'all' && x.tipo !== fTipo) return false;
+    return rowsC.filter((x) => {
+      if (fTipo !== 'all' && x.clase !== fTipo) return false;
       if (fYear !== 'all' && x.year !== fYear) return false;
       if (fMonth !== 'all' && x.month !== fMonth) return false;
       if (!terms.length) return true;
-      const hay = [tipoInfo(x.tipo)[0], x.fecha, x.emisorRfc, x.emisorNombre, x.receptorRfc, x.receptorNombre, x.uuid,
+      const hay = [claseInfo(x.clase)[0], x.tipo, x.fecha, x.emisorRfc, x.emisorNombre, x.receptorRfc, x.receptorNombre, x.uuid,
         x.subtotal, x.descuento, x.iva, x.ivaRet, x.isrRet, x.total, x.moneda, x.id].join(' ').toLowerCase();
       return terms.every((t) => hay.includes(t));
     }).sort((p, q) => {
       const A = p[sort.k], B = q[sort.k];
       return (col.n ? A - B : String(A).localeCompare(String(B), 'es')) * sort.dir;
     });
-  }, [rows, search, fTipo, fYear, fMonth, sort]);
+  }, [rowsC, search, fTipo, fYear, fMonth, sort]);
 
   const sum = useMemo(() => {
-    const s = { ing: 0, egr: 0, iva: 0, ivaRet: 0, isrRet: 0 };
+    const z = () => ({ n: 0, sub: 0, baseXml: 0, iva16: 0, iva8: 0, ivaOtro: 0, ivaRet: 0, isrRet: 0, total: 0, cfdiTotal: 0, out: 0 });
+    const s = { ing: z(), egr: z(), nom: z() };
+    const MAP = { ING: ['ing', 1], NCE: ['ing', -1], EGR: ['egr', 1], NCR: ['egr', -1], NOM: ['nom', 1] };
+    const r2 = (v) => Math.round(v * 100) / 100;
     view.forEach((x) => {
-      if (x.tipo === 'I') s.ing += x.total * x.tc;
-      if (x.tipo === 'E') s.egr += x.total * x.tc;
-      s.iva += x.iva * x.tc; s.ivaRet += x.ivaRet * x.tc; s.isrRet += x.isrRet * x.tc;
+      const m = MAP[x.clase];
+      if (!m) return;
+      const t = s[m[0]], k = m[1] * x.tc;
+      t.n += 1; t.cfdiTotal += k * x.total;
+      if (m[0] === 'nom') { // Nómina: percepciones (subtotal), ISR y neto pagado
+        t.sub += k * x.subtotal; t.total += k * x.total; t.isrRet += k * x.isrRet;
+      } else if (x.iva16 + x.iva8 > 0.005) { // Ingresos/Egresos: solo CFDI con IVA 16%/8%
+        const bi = r2(x.iva16 / 0.16) + r2(x.iva8 / 0.08); // base = IVA ÷ tasa, redondeada por CFDI (criterio del validador)
+        t.sub += k * bi; t.baseXml += k * (x.base16 + x.base8);
+        t.total += k * r2(bi + x.iva - x.ivaRet - x.isrRet); // Total redondeado por CFDI
+        t.iva16 += k * x.iva16; t.iva8 += k * x.iva8; t.ivaOtro += k * (x.iva - x.iva16 - x.iva8);
+        t.ivaRet += k * x.ivaRet; t.isrRet += k * x.isrRet;
+      }
     });
+    ['ing', 'egr'].forEach((c) => { s[c].out = s[c].cfdiTotal - s[c].total; }); // lo que queda fuera del cálculo
     return s;
   }, [view]);
 
-  async function exportCSV() {
-    if (!view.length) { setNote('No hay comprobantes para exportar con los filtros actuales.'); return; }
-    const csv = toCSV(view);
+  async function deliver(csv, prefix, n) {
+    if (!n) { setNote('No hay comprobantes para exportar con los filtros actuales.'); return; }
     if (dl) {
       try {
-        await dl.save({ filename: 'cfdi_' + new Date().toISOString().slice(0, 10) + '.csv', data: csv });
-        setNote('CSV generado con ' + view.length + ' comprobantes.');
+        await dl.save({ filename: prefix + '_' + new Date().toISOString().slice(0, 10) + '.csv', data: csv });
+        setNote('CSV generado con ' + n + ' comprobantes.');
       } catch (e) {
         if (!e || e.code !== 'declined') setNote('No se pudo guardar el archivo: ' + ((e && e.message) || 'error desconocido'));
       }
@@ -305,11 +507,24 @@ function App() {
       catch (e) { setNote('La descarga y el portapapeles no están disponibles en este visor.'); }
     }
   }
+  const exportCSV = () => deliver(toCSV(view), 'cfdi', view.length);
+  const nomRows = view.filter((x) => x.clase === 'NOM');
+  const exportNom = () => deliver(toCSVNomina(nomRows), 'nominas', nomRows.length);
 
   const onDrop = (e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer && e.dataTransfer.files[0]); };
   const fmt = (b) => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
   const n = result ? result.count : 0;
   const msg = n === 1 ? 'Se encontró 1 archivo XML listo para procesar' : 'Se encontraron ' + n + ' archivos XML listos para procesar';
+  const sinCount = rowsC.filter((x) => x.clase === 'SIN').length;
+  const sinNote = sinCount ? h('div', { className: 'mb-4 rounded-xl border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 p-3 text-sm' },
+    rfcN ? sinCount + ' comprobante(s) de ingreso/egreso no coinciden con tu RFC como emisor ni como receptor y quedaron "Sin clasificar" (no suman en las tarjetas).'
+         : 'Captura tu RFC arriba para clasificar las facturas como Ingreso (emitidas) o Egreso (recibidas); mientras tanto quedan "Sin clasificar".') : null;
+  const rfcBox = h('div', { className: CARD + ' p-4 mb-6 flex flex-wrap items-center gap-3' },
+    h('label', { htmlFor: 'rfc', className: 'text-sm font-semibold' }, 'Ingresa tu RFC'),
+    h('input', { id: 'rfc', value: rfc, maxLength: 13, autoComplete: 'off', spellCheck: false, placeholder: 'Ej. XAXX010101000',
+      onChange: (e) => setRfc(e.target.value.toUpperCase()), className: SELECT + ' font-mono uppercase w-56' }),
+    h('span', { className: 'text-xs ' + (rfcN && !rfcOk ? 'text-red-600 dark:text-red-400' : 'text-slate-500 dark:text-slate-400') },
+      rfcN && !rfcOk ? 'Formato de RFC no válido (12 o 13 caracteres)' : 'Se guarda solo en este navegador y define qué es Ingreso y qué es Egreso.'));
   const filtersOn = fTipo !== 'all' || fYear !== 'all' || fMonth !== 'all' || search;
 
   const zone = h('div', {
@@ -342,9 +557,9 @@ function App() {
   const toolbar = h('div', { className: 'p-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center gap-2' },
     h('input', { type: 'search', value: search, onChange: (e) => setSearch(e.target.value),
       placeholder: 'Buscar por RFC, nombre, UUID, monto…', className: SELECT + ' flex-1 min-w-[12rem]' }),
-    h('select', { value: fTipo, onChange: (e) => setFTipo(e.target.value), className: SELECT, 'aria-label': 'Tipo de comprobante' },
-      [h('option', { key: 'all', value: 'all' }, 'Todos los tipos')].concat(
-        Object.keys(TIPOS).map((k) => h('option', { key: k, value: k }, TIPOS[k][0] + ' (' + (tipoCount[k] || 0) + ')')))),
+    h('select', { value: fTipo, onChange: (e) => setFTipo(e.target.value), className: SELECT, 'aria-label': 'Clasificación' },
+      [h('option', { key: 'all', value: 'all' }, 'Todas las clasificaciones')].concat(
+        Object.keys(CLASES).map((k) => h('option', { key: k, value: k }, CLASES[k][0] + ' (' + (tipoCount[k] || 0) + ')')))),
     h('select', { value: fYear, onChange: (e) => setFYear(e.target.value), className: SELECT, 'aria-label': 'Año' },
       [h('option', { key: 'all', value: 'all' }, 'Todos los años')].concat(years.map((y) => h('option', { key: y, value: y }, y)))),
     h('select', { value: fMonth, onChange: (e) => setFMonth(e.target.value), className: SELECT, 'aria-label': 'Mes' },
@@ -356,17 +571,18 @@ function App() {
       dl ? '⬇ Exportar CSV' : '📋 Copiar CSV'));
 
   const table = status === 'done' && rows.length > 0 ? h('div', { className: 'mt-6' },
-    h('div', { className: 'grid grid-cols-2 md:grid-cols-5 gap-3 mb-4' },
-      h(Stat, { label: 'Ingresos', val: sum.ing }), h(Stat, { label: 'Egresos', val: sum.egr }),
-      h(Stat, { label: 'IVA trasladado', val: sum.iva }), h(Stat, { label: 'IVA retenido', val: sum.ivaRet }),
-      h(Stat, { label: 'ISR retenido', val: sum.isrRet })),
+    sinNote,
+    h(Report, { s: sum, tab, setTab, rfc: rfcN, per: periodo(view),
+      nombre: (rowsC.find((x) => rfcN && x.emisorRfc.toUpperCase() === rfcN) || {}).emisorNombre ||
+              (rowsC.find((x) => rfcN && x.receptorRfc.toUpperCase() === rfcN) || {}).receptorNombre || '' }),
+    tab === 'nom' ? h(NominaTable, { rows: nomRows, onExport: exportNom }) : null,
     h('div', { className: CARD + ' overflow-hidden' },
       toolbar,
       h('div', { className: 'px-3 py-2 text-sm text-slate-500 dark:text-slate-400 flex justify-between gap-2 flex-wrap' },
         h('span', null, view.length + ' de ' + rows.length + ' comprobantes'), note ? h('span', null, note) : null),
       h(DataTable, { rows: view, sort, setSort })),
     h('p', { className: 'text-xs text-slate-500 dark:text-slate-400 mt-3' },
-      'Las tarjetas y el CSV usan los comprobantes filtrados; las tarjetas convierten a MXN con el TipoCambio del CFDI. El estatus de cancelación no puede verificarse sin conexión al SAT.')) : null;
+      'El reporte y el CSV usan los comprobantes filtrados y convierten a MXN con el TipoCambio. En Ingresos y Egresos solo entran los CFDI con IVA 16%/8%; la base se calcula como IVA ÷ tasa por CFDI (criterio del validador) y el Total se redondea por CFDI. Lo demás se muestra aparte como «Fuera del cálculo». El Total de Nómina es el neto pagado (Subtotal − deducciones); el Gran Total suma los totales de cada categoría. Las notas de crédito restan de su categoría; Pagos y Traslados no suman. El estatus de cancelación no puede verificarse sin conexión al SAT.')) : null;
 
   return h('div', { className: 'min-h-screen' },
     h('div', { className: 'mx-auto max-w-7xl px-4 py-8' },
@@ -377,7 +593,7 @@ function App() {
         h('button', { onClick: () => setDark(!dark), 'aria-label': 'Cambiar tema',
           className: 'shrink-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800' },
           dark ? '☀️ Claro' : '🌙 Oscuro')),
-      zone, counter, errBox, table));
+      rfcBox, zone, counter, errBox, table));
 }
 
 const rootEl = document.getElementById('root');
